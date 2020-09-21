@@ -30,15 +30,6 @@
 
 #include <json-c/json.h>
 #include <curl/curl.h>
-#include <openssl/err.h>
-#include <openssl/ssl.h>
-
-static char *pem_found;
-
-static size_t writefunction(void *ptr, size_t size, size_t nmemb, void *stream) {
-    fwrite(ptr, size, nmemb, (FILE *) stream);
-    return (nmemb * size);
-}
 
 struct MemoryStruct {
     char *memory;
@@ -65,7 +56,7 @@ WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp) {
     return realsize;
 }
 
-static const char *get_pem(char domain[]) {
+char worker(char api[], char domain[]) {
     CURL *ch;
     CURLcode rv;
 
@@ -89,58 +80,17 @@ static const char *get_pem(char domain[]) {
 
     curl_easy_setopt(ch, CURLOPT_SSLCERTTYPE, "PEM");
     curl_easy_setopt(ch, CURLOPT_SSL_VERIFYPEER, 1L);
-    curl_easy_setopt(ch, CURLOPT_URL, domain);
+    curl_easy_setopt(ch, CURLOPT_URL, api);
     rv = curl_easy_perform(ch);
-
     if (rv != CURLE_OK) {
-        fprintf(stderr, "curl_easy_perform() failed: %s\n", curl_easy_strerror(rv));
-    } else {
-        printf("%lu bytes retrieved\n", (unsigned long) chunk.size);
-    }
-    json_object *jobj = json_tokener_parse(chunk.memory);
-    const char *pem;
-    pem = json_object_get_string(json_object_object_get(jobj, "pem"));
-    return pem;
-}
-
-char worker(char domain[]) {
-    CURL *ch;
-    CURLcode rv;
-
-    struct MemoryStruct chunk;
-
-    chunk.memory = malloc(1);  /* will be grown as needed by the realloc above */
-    chunk.size = 0;    /* no data at this point */
-
-    curl_global_init(CURL_GLOBAL_ALL);
-    ch = curl_easy_init();
-    curl_easy_setopt(ch, CURLOPT_VERBOSE, 0L);
-    curl_easy_setopt(ch, CURLOPT_HEADER, 0L);
-    curl_easy_setopt(ch, CURLOPT_NOPROGRESS, 1L);
-    curl_easy_setopt(ch, CURLOPT_NOSIGNAL, 1L);
-    curl_easy_setopt(ch, CURLOPT_WRITEDATA, stdout);
-
-    /* send all data to this function  */
-    curl_easy_setopt(ch, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
-    /* we pass our 'chunk' struct to the callback function */
-    curl_easy_setopt(ch, CURLOPT_WRITEDATA, (void *) &chunk);
-
-    curl_easy_setopt(ch, CURLOPT_SSLCERTTYPE, "PEM");
-    curl_easy_setopt(ch, CURLOPT_SSL_VERIFYPEER, 1L);
-    curl_easy_setopt(ch, CURLOPT_URL, domain);
-    rv = curl_easy_perform(ch);
-
-    json_object *jobj = json_tokener_parse(chunk.memory);
-    const char *pem;
-    pem = json_object_get_string(json_object_object_get(jobj, "pem"));
-    const char *sha256;
-    sha256=json_object_get_string(json_object_object_get(json_object_object_get(json_object_object_get(jobj, "certificate"), "hashes"), "sha256"));
-    printf("Found sha256: %s\n", sha256);
-//    pem_found = *pem;
-    if (rv != CURLE_OK) {
-        printf("*** transfer failed ***\n");
+        printf("*** Failed to reach api.cert.ist: %d ***\n", rv);
         return 1;
     }
+    json_object *jobj = json_tokener_parse(chunk.memory);
+    struct json_object *base = json_object_object_get(jobj, "public_key");
+    struct json_object *pem_obj = json_object_object_get(base, "pem");
+    const char *pem = json_object_get_string(pem_obj);
+    printf("Found public_key pem:\n%s\n", pem);
 
     /* use a fresh connection (optional)
      * this option seriously impacts performance of multiple transfers but
@@ -153,30 +103,30 @@ char worker(char domain[]) {
      */
     curl_easy_setopt(ch, CURLOPT_FRESH_CONNECT, 1L);
 
-    char out[SHA256_DIGEST_LENGTH+8*10]="sha256//";
-    unsigned char *d = SHA256(pem, strlen((char *) pem), 0);
-
-    int i;
-    for (i = 0; i < SHA256_DIGEST_LENGTH; i++) {
-        char temp[4];
-        sprintf(temp, "%02x", d[i]);
-        strcat(out, temp);
+    FILE *file = fopen("cert.pem", "w");
+    int results = fputs(pem, file);
+    if (results == EOF) {
+        printf("Error results: %d", results);
     }
-    printf("helo: %s\n", out);
-    char final[SHA256_DIGEST_LENGTH+8*10];
-    curl_easy_setopt(ch, CURLOPT_PINNEDPUBLICKEY, final);
+    fclose(file);
+    curl_easy_setopt(ch, CURLOPT_URL, domain);
+    curl_easy_setopt(ch, CURLOPT_PINNEDPUBLICKEY, "../urip.io.pubkey.pem");
+    curl_easy_setopt(ch, CURLOPT_PINNEDPUBLICKEY, "cert.pem");
 
     rv = curl_easy_perform(ch);
-    if (rv == CURLE_OK)
+    printf("Done with call\n");
+    if (rv == CURLE_OK) {
         printf("*** transfer succeeded ***\n");
-    else
-        printf("*** transfer failed ***\n");
-
+    } else if (rv == CURLE_SSL_PINNEDPUBKEYNOTMATCH) {
+        printf("certs did not match\n");
+    } else {
+        printf("*** transfer failed *** : %d", rv);
+    }
     curl_easy_cleanup(ch);
     curl_global_cleanup();
     return rv;
 }
 
 int main(void) {
-    return worker("https://api.cert.ist/urip.io");
+    return worker("https://api.cert.ist/urip.io", "https://urip.io");
 }
