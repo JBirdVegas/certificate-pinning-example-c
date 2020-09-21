@@ -36,6 +36,8 @@ struct MemoryStruct {
     size_t size;
 };
 
+const char *pubkey_file = "pubkey.pem";
+
 static size_t
 WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp) {
     size_t realsize = size * nmemb;
@@ -52,7 +54,6 @@ WriteMemoryCallback(void *contents, size_t size, size_t nmemb, void *userp) {
     memcpy(&(mem->memory[mem->size]), contents, realsize);
     mem->size += realsize;
     mem->memory[mem->size] = 0;
-
     return realsize;
 }
 
@@ -60,11 +61,12 @@ char worker(char api[], char domain[]) {
     CURL *ch;
     CURLcode rv;
 
+    // setup api response data holder
     struct MemoryStruct chunk;
+    chunk.memory = malloc(1);
+    chunk.size = 0;
 
-    chunk.memory = malloc(1);  /* will be grown as needed by the realloc above */
-    chunk.size = 0;    /* no data at this point */
-
+    // setup libcurl
     curl_global_init(CURL_GLOBAL_ALL);
     ch = curl_easy_init();
     curl_easy_setopt(ch, CURLOPT_VERBOSE, 0L);
@@ -72,25 +74,33 @@ char worker(char api[], char domain[]) {
     curl_easy_setopt(ch, CURLOPT_NOPROGRESS, 1L);
     curl_easy_setopt(ch, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(ch, CURLOPT_WRITEDATA, stdout);
-
-    /* send all data to this function  */
     curl_easy_setopt(ch, CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
-    /* we pass our 'chunk' struct to the callback function */
     curl_easy_setopt(ch, CURLOPT_WRITEDATA, (void *) &chunk);
-
     curl_easy_setopt(ch, CURLOPT_SSLCERTTYPE, "PEM");
     curl_easy_setopt(ch, CURLOPT_SSL_VERIFYPEER, 1L);
+
+    // call api.cert.ist to get the expected public keys
     curl_easy_setopt(ch, CURLOPT_URL, api);
     rv = curl_easy_perform(ch);
     if (rv != CURLE_OK) {
-        printf("*** Failed to reach api.cert.ist: %d ***\n", rv);
+        printf("*** Failed to reach %s: %d ***\n", api, rv);
         return 1;
     }
+
+    // parse our the public key pem from cert.ist's api
     json_object *jobj = json_tokener_parse(chunk.memory);
-    struct json_object *base = json_object_object_get(jobj, "public_key");
-    struct json_object *pem_obj = json_object_object_get(base, "pem");
+    struct json_object *base = json_object_object_get(jobj, "libcurl");
+    struct json_object *pubkey_obj = json_object_object_get(base, "pubkey");
+    struct json_object *pem_obj = json_object_object_get(pubkey_obj, "pem");
     const char *pem = json_object_get_string(pem_obj);
-    printf("Found public_key pem:\n%s\n", pem);
+
+    // write the PEM public key to a file
+    FILE *file = fopen(pubkey_file, "w");
+    int results = fputs(pem, file);
+    if (results == EOF) {
+        printf("Error results: %d", results);
+    }
+    fclose(file);
 
     /* use a fresh connection (optional)
      * this option seriously impacts performance of multiple transfers but
@@ -102,25 +112,19 @@ char worker(char api[], char domain[]) {
      * any transfers, and not use this option.
      */
     curl_easy_setopt(ch, CURLOPT_FRESH_CONNECT, 1L);
-
-    FILE *file = fopen("cert.pem", "w");
-    int results = fputs(pem, file);
-    if (results == EOF) {
-        printf("Error results: %d", results);
-    }
-    fclose(file);
+    // tell curl to call the domain in question
     curl_easy_setopt(ch, CURLOPT_URL, domain);
-    curl_easy_setopt(ch, CURLOPT_PINNEDPUBLICKEY, "../urip.io.pubkey.pem");
-    curl_easy_setopt(ch, CURLOPT_PINNEDPUBLICKEY, "cert.pem");
+    // tell curl to pin the public key we found from the API to the
+    // public key curl receives during the TLS hello handshake
+    curl_easy_setopt(ch, CURLOPT_PINNEDPUBLICKEY, pubkey_file);
 
     rv = curl_easy_perform(ch);
-    printf("Done with call\n");
     if (rv == CURLE_OK) {
-        printf("*** transfer succeeded ***\n");
+        printf("(%s) certs matched :D\n", domain);
     } else if (rv == CURLE_SSL_PINNEDPUBKEYNOTMATCH) {
-        printf("certs did not match\n");
+        printf("(%s) certs did not match\n", domain);
     } else {
-        printf("*** transfer failed *** : %d", rv);
+        printf("Something else happened, we received error code: %d\n", rv);
     }
     curl_easy_cleanup(ch);
     curl_global_cleanup();
@@ -128,5 +132,8 @@ char worker(char api[], char domain[]) {
 }
 
 int main(void) {
-    return worker("https://api.cert.ist/urip.io", "https://urip.io");
+    char example = worker("https://api.cert.ist/example.com", "https://example.com");
+    char certist = worker("https://api.cert.ist/cert.ist", "https://cert.ist");
+    char uripio = worker("https://api.cert.ist/urip.io", "https://urip.io");
+    return example + certist + uripio;
 }

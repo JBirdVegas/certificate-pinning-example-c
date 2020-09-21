@@ -1,0 +1,6 @@
+CMakeFiles/
+cmake-build-debug/
+*.iml
+.idea/
+CMakeCache.txt
+pubkey.pem
